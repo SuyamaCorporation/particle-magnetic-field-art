@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>粒子磁場アートメーカー</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #0a0a1a; }
+    canvas { display: block; cursor: crosshair; }
+    input[type=range] { accent-color: #818cf8; }
+    .pole-btn { transition: all 0.2s; }
+    .pole-btn.active { box-shadow: 0 0 12px 3px currentColor; }
+  </style>
+</head>
+<body class="min-h-screen text-white flex flex-col items-center py-4 gap-4">
+  <h1 class="text-2xl font-bold text-indigo-300">粒子磁場アートメーカー</h1>
+
+  <div class="flex flex-wrap gap-3 items-center justify-center bg-gray-900 rounded-xl p-3 w-full max-w-3xl">
+    <!-- Polarity toggle -->
+    <div class="flex gap-2">
+      <button id="btnPos" class="pole-btn active px-4 py-1 rounded-full bg-red-700 text-white font-bold text-lg" style="color:#ff6666;">＋極（引力）</button>
+      <button id="btnNeg" class="pole-btn px-4 py-1 rounded-full bg-blue-700 text-white font-bold text-lg" style="color:#66aaff;">－極（斥力）</button>
+    </div>
+    <!-- Particle count -->
+    <label class="flex flex-col items-center text-xs text-gray-300 gap-1">
+      粒子数
+      <input type="range" id="sliderCount" min="100" max="2000" value="600" step="50" class="w-28" />
+      <span id="valCount" class="text-indigo-300">600</span>
+    </label>
+    <!-- Strength -->
+    <label class="flex flex-col items-center text-xs text-gray-300 gap-1">
+      極の強度
+      <input type="range" id="sliderStrength" min="1" max="20" value="6" step="1" class="w-28" />
+      <span id="valStrength" class="text-indigo-300">6</span>
+    </label>
+    <!-- Color scheme -->
+    <label class="flex flex-col items-center text-xs text-gray-300 gap-1">
+      カラースキーム
+      <select id="selectColor" class="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm">
+        <option value="rainbow">速度レインボー</option>
+        <option value="mono">モノクローム</option>
+        <option value="heat">ヒートマップ</option>
+      </select>
+    </label>
+    <!-- Buttons -->
+    <button id="btnClear" class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm">クリア</button>
+    <button id="btnSave" class="px-3 py-1 rounded bg-indigo-700 hover:bg-indigo-600 text-sm">PNG保存</button>
+  </div>
+
+  <div class="relative">
+    <canvas id="canvas" class="rounded-xl border border-gray-700"></canvas>
+    <!-- Pole legend -->
+    <div class="absolute top-2 left-2 text-xs text-gray-400 pointer-events-none">
+      クリックで極を配置
+    </div>
+  </div>
+
+  <script>
+  (() => {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const W = Math.min(window.innerWidth - 32, 700);
+    const H = Math.min(window.innerHeight - 240, 650);
+    canvas.width = W;
+    canvas.height = H;
+
+    let poles = [];            // {x, y, sign: +1 or -1}
+    let particles = [];
+    let currentPolarity = 1;   // +1 positive, -1 negative
+    let colorScheme = 'rainbow';
+    let strength = 6;
+    let particleCount = 600;
+    let animId;
+
+    // Offscreen for trails
+    const offscreen = document.createElement('canvas');
+    offscreen.width = W;
+    offscreen.height = H;
+    const off = offscreen.getContext('2d');
+
+    function initParticles(n) {
+      particles = [];
+      for (let i = 0; i < n; i++) {
+        particles.push({
+          x: Math.random() * W,
+          y: Math.random() * H,
+          vx: (Math.random() - 0.5) * 0.5,
+          vy: (Math.random() - 0.5) * 0.5,
+          speed: 0,
+          trail: []
+        });
+      }
+    }
+
+    function colorFromSpeed(speed, scheme) {
+      const s = Math.min(speed / 4, 1);
+      if (scheme === 'rainbow') {
+        const h = (1 - s) * 240; // blue=slow, red=fast
+        return `hsla(${h}, 100%, 65%, 0.85)`;
+      } else if (scheme === 'mono') {
+        const v = Math.floor(55 + s * 200);
+        return `rgba(${v},${v},${v},0.85)`;
+      } else { // heat
+        const r = Math.floor(s * 255);
+        const g = Math.floor(s < 0.5 ? s * 2 * 180 : (1 - s) * 2 * 180);
+        const b = Math.floor((1 - s) * 200);
+        return `rgba(${r},${g},${b},0.85)`;
+      }
+    }
+
+    function step() {
+      // Fade the offscreen
+      off.fillStyle = 'rgba(0,0,0,0.04)';
+      off.fillRect(0, 0, W, H);
+
+      for (const p of particles) {
+        let ax = 0, ay = 0;
+        for (const pole of poles) {
+          const dx = pole.x - p.x;
+          const dy = pole.y - p.y;
+          const dist2 = dx * dx + dy * dy;
+          const dist = Math.sqrt(dist2) + 1;
+          const force = (strength * 500 * pole.sign) / (dist2 + 200);
+          ax += (dx / dist) * force;
+          ay += (dy / dist) * force;
+        }
+        p.vx = (p.vx + ax * 0.016) * 0.98;
+        p.vy = (p.vy + ay * 0.016) * 0.98;
+        const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+        p.speed = spd;
+        // Clamp speed
+        if (spd > 6) { p.vx *= 6 / spd; p.vy *= 6 / spd; }
+
+        p.x += p.vx;
+        p.y += p.vy;
+
+        // Wrap around edges
+        if (p.x < 0) p.x = W;
+        if (p.x > W) p.x = 0;
+        if (p.y < 0) p.y = H;
+        if (p.y > H) p.y = 0;
+
+        const col = colorFromSpeed(p.speed, colorScheme);
+        off.fillStyle = col;
+        off.fillRect(p.x - 0.7, p.y - 0.7, 1.4, 1.4);
+      }
+
+      // Draw offscreen to main canvas
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+      ctx.drawImage(offscreen, 0, 0);
+
+      // Draw poles
+      for (const pole of poles) {
+        const col = pole.sign > 0 ? '#ff5555' : '#5588ff';
+        ctx.beginPath();
+        ctx.arc(pole.x, pole.y, 10, 0, Math.PI * 2);
+        ctx.fillStyle = col;
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(pole.sign > 0 ? '+' : '−', pole.x, pole.y);
+        // Glow
+        ctx.beginPath();
+        ctx.arc(pole.x, pole.y, 14, 0, Math.PI * 2);
+        ctx.strokeStyle = col + '88';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      animId = requestAnimationFrame(step);
+    }
+
+    function resetSim() {
+      cancelAnimationFrame(animId);
+      off.clearRect(0, 0, W, H);
+      off.fillStyle = '#000';
+      off.fillRect(0, 0, W, H);
+      initParticles(particleCount);
+      step();
+    }
+
+    // Events
+    canvas.addEventListener('click', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      poles.push({ x, y, sign: currentPolarity });
+    });
+
+    document.getElementById('btnPos').addEventListener('click', () => {
+      currentPolarity = 1;
+      document.getElementById('btnPos').classList.add('active');
+      document.getElementById('btnNeg').classList.remove('active');
+    });
+    document.getElementById('btnNeg').addEventListener('click', () => {
+      currentPolarity = -1;
+      document.getElementById('btnNeg').classList.add('active');
+      document.getElementById('btnPos').classList.remove('active');
+    });
+
+    const sliderCount = document.getElementById('sliderCount');
+    const valCount = document.getElementById('valCount');
+    sliderCount.addEventListener('input', () => {
+      particleCount = parseInt(sliderCount.value);
+      valCount.textContent = particleCount;
+      initParticles(particleCount);
+    });
+
+    const sliderStrength = document.getElementById('sliderStrength');
+    const valStrength = document.getElementById('valStrength');
+    sliderStrength.addEventListener('input', () => {
+      strength = parseInt(sliderStrength.value);
+      valStrength.textContent = strength;
+    });
+
+    document.getElementById('selectColor').addEventListener('change', (e) => {
+      colorScheme = e.target.value;
+    });
+
+    document.getElementById('btnClear').addEventListener('click', () => {
+      poles = [];
+      resetSim();
+    });
+
+    document.getElementById('btnSave').addEventListener('click', () => {
+      const link = document.createElement('a');
+      link.download = '粒子磁場アート.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    });
+
+    // Init
+    resetSim();
+  })();
+  </script>
+</body>
+</html>
